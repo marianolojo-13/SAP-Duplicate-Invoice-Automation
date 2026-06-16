@@ -1,0 +1,1190 @@
+Attribute VB_Name = "Module1"
+' ====================================================================================
+' MACRO PRINCIPAL: Descarga de SAP, Limpieza de TXT, Unión de Datos y Fórmulas
+' ====================================================================================
+Public Sub LimpiarYUnirLogs()
+
+    ' --- 1. Declaración de Variables ---
+    Dim wsLog As Worksheet, wsInst As Worksheet
+    Dim wbTxt As Workbook, wsTxt As Worksheet
+    Dim colFechas As Collection
+    Dim fechaObj As Variant
+    Dim fechaObjetivo As Date
+    Dim nombreArchivo As String, rutaCompleta As String, rutaBase As String
+    Dim uFilaTxt As Long, j As Long, uFilaLog As Long
+    Dim valorColA As String, valorColB As String
+    Dim rngCopiar As Range
+    Dim encabezados As Variant
+    
+    ' Variables para SAP
+    Dim SapGuiAuto As Object, sapApp As Object, connection As Object, session As Object
+    Dim jobListado As Object
+    
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    
+    ' Nota: SAP prefiere la ruta sin la barra diagonal al final para el DY_PATH
+    rutaBase = "U:\SAP\Documents"
+    Set wsInst = ThisWorkbook.Sheets("Instructions")
+    Set colFechas = New Collection
+    
+    ' --- 2. CONEXIÓN A SAP ---
+    On Error Resume Next
+    Set SapGuiAuto = GetObject("SAPGUI")
+    Set sapApp = SapGuiAuto.GetScriptingEngine
+    Set connection = sapApp.Children(0)
+    Set session = connection.Children(0)
+    On Error GoTo 0
+
+    If session Is Nothing Then
+        MsgBox "Error: SAP debe estar abierto en la pantalla principal antes de ejecutar la macro.", vbCritical
+        Application.ScreenUpdating = True
+        Application.DisplayAlerts = True
+        Exit Sub
+    End If
+    
+    ' --- 3. VALIDACIÓN OBLIGATORIA DE FECHAS (Instructions D2 y G2) ---
+    If Trim(wsInst.Range("D2").Value) = "" Or Trim(wsInst.Range("G2").Value) = "" Then
+        MsgBox "Error: Las celdas de fechas (D2 y G2) en la pestaña 'Instructions' DEBEN estar completadas.", vbCritical, "Campos Obligatorios"
+        Application.ScreenUpdating = True
+        Application.DisplayAlerts = True
+        Exit Sub
+    End If
+    
+    If Not IsDate(wsInst.Range("D2").Value) Or Not IsDate(wsInst.Range("G2").Value) Then
+        MsgBox "Error: Los valores en D2 y G2 deben ser fechas válidas.", vbCritical, "Formato Incorrecto"
+        Application.ScreenUpdating = True
+        Application.DisplayAlerts = True
+        Exit Sub
+    End If
+
+    ' Agregar rango de fechas exacto al bucle
+    Dim fStart As Date, fEnd As Date, d As Date
+    fStart = CDate(wsInst.Range("D2").Value)
+    fEnd = CDate(wsInst.Range("G2").Value)
+    
+    If fStart > fEnd Then
+        MsgBox "Error: La fecha de inicio (D2) no puede ser mayor a la fecha de fin (G2).", vbCritical, "Fechas Inválidas"
+        Application.ScreenUpdating = True
+        Application.DisplayAlerts = True
+        Exit Sub
+    End If
+
+    For d = fStart To fEnd
+        colFechas.Add d
+    Next d
+    
+    ' --- 4. CONFIGURACIÓN DE PESTAÑA DESTINO ("RawData") ---
+    On Error Resume Next
+    Set wsLog = ThisWorkbook.Sheets("RawData")
+    On Error GoTo 0
+    
+    If wsLog Is Nothing Then
+        Set wsLog = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsLog.Name = "RawData"
+    End If
+    
+    wsLog.Cells.Clear ' Borrar todo el historial previo
+    
+    ' ESCRIBIR LOS ENCABEZADOS (Añadido "Concatenate" en la Columna R)
+    encabezados = Array("Company Code", "Document Number", "Invoice Num.", "Vendor Number", _
+                        "Invoice Amount", "Inv. date", "Check Number", "Creation Date", _
+                        "Invoice Due Date", "Payment Block Key", "Invoice Status", "Created By", _
+                        "Reference (Numbers Only)", "Ref+Amount", "Ref+InvDate+Amount+Vendor", _
+                        "Ref+InvDate+Amount", "Vendor+Inv Reference", "Concatenate")
+                        
+    wsLog.Range("A1").Resize(1, 18).Value = encabezados
+    wsLog.Range("A1:R1").Font.Bold = True
+
+    ' --- 5. BUCLE PARA DESCARGAR DE SAP, ABRIR, LIMPIAR Y UNIR ARCHIVOS TXT ---
+    For Each fechaObj In colFechas
+        
+        fechaObjetivo = CDate(fechaObj)
+        nombreArchivo = "duplicates " & Format(fechaObjetivo, "m-d-yyyy") & ".txt"
+        rutaCompleta = rutaBase & "\" & nombreArchivo
+        
+        ' --- 5.1. DESCARGA DESDE SAP (SM37) ---
+        On Error Resume Next
+        session.findById("wnd[0]").maximize
+        session.findById("wnd[0]/tbar[0]/okcd").Text = "/nSM37"
+        session.findById("wnd[0]").sendVKey 0
+        
+        session.findById("wnd[0]/usr/txtBTCH2170-JOBNAME").Text = "d_FIAPDUPINVREP"
+        session.findById("wnd[0]/usr/txtBTCH2170-USERNAME").Text = "*"
+        
+        ' =========================================================================
+        ' SOLUCIÓN SM37: Uso de los campos FROM_DATE y TO_DATE obtenidos en la grabación
+        ' =========================================================================
+        session.findById("wnd[0]/usr/ctxtBTCH2170-FROM_DATE").Text = Format(fechaObjetivo, "mm/dd/yyyy")
+        session.findById("wnd[0]/usr/ctxtBTCH2170-TO_DATE").Text = Format(fechaObjetivo, "mm/dd/yyyy")
+        
+        session.findById("wnd[0]/usr/ctxtBTCH2170-TO_DATE").SetFocus
+        session.findById("wnd[0]").sendVKey 0 ' <-- ENTER: Obliga a SAP a tomar la fecha
+        ' =========================================================================
+        
+        session.findById("wnd[0]/tbar[1]/btn[8]").press
+        
+        Set jobListado = session.findById("wnd[0]/usr/lbl[4,14]")
+        
+        If Not jobListado Is Nothing Then
+            jobListado.SetFocus
+            session.findById("wnd[0]/tbar[1]/btn[44]").press
+            session.findById("wnd[0]/usr/lbl[14,3]").SetFocus
+            session.findById("wnd[0]").sendVKey 2
+            
+            session.findById("wnd[0]/tbar[1]/btn[46]").press
+            session.findById("wnd[1]/usr/txtDIS_TO").Text = "9999"
+            session.findById("wnd[1]").sendVKey 0
+            
+            If session.Children.Count > 2 Then
+                session.findById("wnd[2]/tbar[0]/btn[0]").press
+            End If
+            
+            session.findById("wnd[0]/mbar/menu[0]/menu[2]/menu[3]").Select
+            session.findById("wnd[1]/tbar[0]/btn[0]").press
+            
+            session.findById("wnd[1]/usr/ctxtDY_PATH").Text = rutaBase
+            session.findById("wnd[1]/usr/ctxtDY_FILENAME").Text = nombreArchivo
+            session.findById("wnd[1]/tbar[0]/btn[0]").press
+            
+            ' Confirmar sobreescritura si el archivo ya existe
+            If session.Children.Count > 1 Then
+                session.findById("wnd[1]/tbar[0]/btn[11]").press
+            End If
+        End If
+        
+        Set jobListado = Nothing
+        On Error GoTo 0
+        
+        ' --- 5.2. APERTURA Y LIMPIEZA DEL ARCHIVO TXT ---
+        If Dir(rutaCompleta) <> "" Then
+            
+            ' Abrir el TXT
+            Workbooks.OpenText Filename:=rutaCompleta, DataType:=xlDelimited, _
+                TextQualifier:=xlDoubleQuote, ConsecutiveDelimiter:=False, Tab:=False, _
+                Semicolon:=False, Comma:=False, Space:=False, Other:=True, OtherChar:="|"
+            
+            Set wbTxt = ActiveWorkbook
+            Set wsTxt = wbTxt.Sheets(1)
+            
+            ' Borrar margen izquierdo de SAP
+            wsTxt.Columns("A").Delete
+            
+            uFilaTxt = wsTxt.Cells(wsTxt.Rows.Count, "B").End(xlUp).Row
+            
+            ' Bucle de Limpieza (De abajo hacia arriba)
+            For j = uFilaTxt To 1 Step -1
+                valorColA = Trim(wsTxt.Cells(j, 1).Value)
+                valorColB = Trim(wsTxt.Cells(j, 2).Value)
+                
+                If Not IsNumeric(valorColB) Or InStr(valorColB, ",") > 0 Or InStr(1, valorColA, "Records", vbTextCompare) > 0 Or valorColB = "" Then
+                    wsTxt.Rows(j).Delete
+                End If
+            Next j
+            
+            ' COPIAR Y PEGAR EN RAWDATA
+            uFilaTxt = wsTxt.Cells(wsTxt.Rows.Count, "B").End(xlUp).Row
+            uFilaLog = wsLog.Cells(wsLog.Rows.Count, "A").End(xlUp).Row
+            
+            If uFilaTxt >= 1 And wsTxt.Range("B1").Value <> "" Then
+                Set rngCopiar = wsTxt.Range("A1:L" & uFilaTxt)
+                rngCopiar.Copy wsLog.Range("A" & uFilaLog + 1)
+            End If
+            
+            wbTxt.Close SaveChanges:=False
+            
+        End If
+        
+    Next fechaObj
+    
+    ' --- 6. POST-PROCESAMIENTO: QUITAR ESPACIOS (TRIM) ---
+    uFilaLog = wsLog.Cells(wsLog.Rows.Count, "A").End(xlUp).Row
+    
+    If uFilaLog > 1 Then
+        Dim dataArr As Variant
+        Dim r As Long, c As Long
+        
+        ' Hacemos Trim a las columnas importadas (A hasta L)
+        dataArr = wsLog.Range("A2:L" & uFilaLog).Value
+        For r = 1 To UBound(dataArr, 1)
+            For c = 1 To UBound(dataArr, 2)
+                If Not IsError(dataArr(r, c)) Then
+                    dataArr(r, c) = Trim(dataArr(r, c))
+                End If
+            Next c
+        Next r
+        wsLog.Range("A2:L" & uFilaLog).Value = dataArr
+        
+        ' --- 7. AGREGAR RESULTADOS DE DUPLICADOS Y FÓRMULAS ---
+        
+        ' 7.1 Llenar la Columna M internamente para evitar el error #NAME?
+        Dim arrM() As Variant
+        ReDim arrM(1 To uFilaLog - 1, 1 To 1)
+        Dim valC As String, numExtraido As String
+        
+        For r = 2 To uFilaLog
+            valC = Trim(wsLog.Cells(r, 3).Value) ' Leemos la Columna C
+            numExtraido = ExtraerNumeros(valC)   ' Ejecutamos la función dentro de VBA
+            
+            If numExtraido = "" Then
+                arrM(r - 1, 1) = valC
+            Else
+                arrM(r - 1, 1) = numExtraido
+            End If
+        Next r
+        wsLog.Range("M2:M" & uFilaLog).Value = arrM ' Pegamos los resultados
+        
+        ' 7.2 Llenar las Columnas N a R (Incluye nueva columna Concatenate)
+        wsLog.Range("N2:N" & uFilaLog).Formula = "=IF(COUNTIFS(M:M,M2,E:E,E2)>1,""Review Possible Duplicate"","""")"
+        wsLog.Range("O2:O" & uFilaLog).Formula = "=IF(COUNTIFS(M:M,M2,E:E,E2,F:F,F2,D:D,D2)>1,""Review Possible Duplicate"","""")"
+        wsLog.Range("P2:P" & uFilaLog).Formula = "=IF(COUNTIFS(M:M,M2,E:E,E2,F:F,F2)>1,""Review Possible Duplicate"","""")"
+        wsLog.Range("Q2:Q" & uFilaLog).Formula = "=IF(COUNTIFS(D:D,D2,M:M,M2)>1,""Review Possible Duplicate"","""")"
+        wsLog.Range("R2:R" & uFilaLog).Formula = "=CONCATENATE(B2,"" "",A2)"
+        
+        ' Convertir fórmulas a valores estáticos para que la eliminación de duplicados sea segura
+        wsLog.Range("N2:R" & uFilaLog).Value = wsLog.Range("N2:R" & uFilaLog).Value
+        
+        ' --- 8. ELIMINAR DUPLICADOS POR COLUMNA B (Document Number) ---
+        wsLog.Range("A1:R" & uFilaLog).RemoveDuplicates Columns:=2, Header:=xlYes
+        
+        ' Recalcular la última fila tras eliminar duplicados
+        uFilaLog = wsLog.Cells(wsLog.Rows.Count, "A").End(xlUp).Row
+
+        ' --- 9. FORMATOS FINALES ---
+        With wsLog
+            .Columns("F").NumberFormat = "mm/dd/yyyy" ' Inv Date
+            .Columns("H").NumberFormat = "mm/dd/yyyy" ' Creation Date
+            .Columns("I").NumberFormat = "mm/dd/yyyy" ' Due Date
+            .Columns("E").NumberFormat = "#,##0.00"   ' Invoice Amount
+            .Columns("A:R").EntireColumn.AutoFit
+        End With
+    End If
+    
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    
+    ' MENSAJE FINAL MODIFICADO A INGLÉS
+    MsgBox "SAP download, TXT cleaning, and debugging completed successfully.", vbInformation, "Process Completed"
+
+End Sub
+
+' ====================================================================================
+' FUNCIÓN AUXILIAR: Extrae los números para la Columna M (No borrar)
+' ====================================================================================
+Public Function ExtraerNumeros(texto As String) As String
+    Dim i As Integer
+    Dim resultado As String
+    resultado = ""
+    For i = 1 To Len(texto)
+        If Mid(texto, i, 1) Like "[0-9]" Then
+            resultado = resultado & Mid(texto, i, 1)
+        End If
+    Next i
+    ExtraerNumeros = resultado
+End Function
+
+Attribute VB_Name = "Module2"
+' ====================================================================================
+' PASO 2: Macro para Filtrar, Ejecutar FBL1N en SAP y Limpiar el Reporte TXT
+' ====================================================================================
+Public Sub EjecutarFBL1N_Y_Limpiar()
+
+    ' --- 1. DECLARACIÓN DE VARIABLES ---
+    Dim wsRaw As Worksheet, wsFBL1N As Worksheet
+    Dim wbTxt As Workbook, wsTxt As Worksheet
+    Dim uFilaRaw As Long, uFilaTxt As Long, rLog As Long
+    Dim rngCopy As Range
+    Dim SapGuiAuto As Object, sapApp As Object, connection As Object, session As Object
+    Dim rutaDestino As String, nombreArchivo As String, rutaCompleta As String
+    Dim reqHeaders As Variant, colMap(1 To 17) As Integer
+    Dim i As Long, c As Long, headerRow As Long
+    Dim docVal As String
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+
+    rutaDestino = "U:\SAP\Documents"
+    nombreArchivo = "FBL1N " & Format(Date, "m-d-yyyy") & ".txt"
+    rutaCompleta = rutaDestino & "\" & nombreArchivo
+
+    ' --- 2. CONFIGURACIÓN DE PESTAÑAS Y FILTRO EN RAWDATA ---
+    Set wsRaw = ThisWorkbook.Sheets("RawData")
+    
+    ' Crear o limpiar pestaña FBL1N
+    On Error Resume Next
+    Set wsFBL1N = ThisWorkbook.Sheets("FBL1N")
+    On Error GoTo 0
+    If wsFBL1N Is Nothing Then
+        Set wsFBL1N = ThisWorkbook.Sheets.Add(After:=wsRaw)
+        wsFBL1N.Name = "FBL1N"
+    End If
+    wsFBL1N.Cells.Clear
+    
+    ' Quitar filtros previos si existen
+    If wsRaw.AutoFilterMode Then wsRaw.AutoFilterMode = False
+    
+    uFilaRaw = wsRaw.Cells(wsRaw.Rows.Count, "A").End(xlUp).Row
+    If uFilaRaw < 2 Then
+        MsgBox "No hay datos en RawData para filtrar.", vbExclamation
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+
+    ' Aplicar filtro: Columna 17 (Q) <> vacío
+    wsRaw.Range("A1:Q" & uFilaRaw).AutoFilter Field:=17, Criteria1:="<>"
+    
+    ' Validar si hay resultados visibles (excluyendo el encabezado)
+    On Error Resume Next
+    Set rngCopy = wsRaw.Range("B2:B" & uFilaRaw).SpecialCells(xlCellTypeVisible)
+    On Error GoTo 0
+    
+    If rngCopy Is Nothing Then
+        MsgBox "No se encontraron registros con duplicados en la columna Q.", vbInformation, "Sin Datos"
+        wsRaw.AutoFilterMode = False
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+    
+    ' ¡CRUCIAL! Copiar los documentos al portapapeles para que SAP pueda leerlos
+    rngCopy.Copy
+
+    ' --- 3. CONEXIÓN A SAP ---
+    On Error Resume Next
+    Set SapGuiAuto = GetObject("SAPGUI")
+    Set sapApp = SapGuiAuto.GetScriptingEngine
+    Set connection = sapApp.Children(0)
+    Set session = connection.Children(0)
+    On Error GoTo 0
+
+    If session Is Nothing Then
+        MsgBox "Error: SAP debe estar abierto en la pantalla principal.", vbCritical
+        wsRaw.AutoFilterMode = False
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+
+    ' --- 4. AUTOMATIZACIÓN DE FBL1N EN SAP ---
+    On Error Resume Next
+    session.findById("wnd[0]").maximize
+    session.findById("wnd[0]/tbar[0]/okcd").Text = "/nFBL1N"
+    session.findById("wnd[0]").sendVKey 0
+    
+    ' Configurar parámetros
+    session.findById("wnd[0]/usr/radX_AISEL").Select ' All items
+    session.findById("wnd[0]/usr/ctxtKD_LIFNR-LOW").Text = "1"
+    session.findById("wnd[0]/usr/ctxtKD_LIFNR-HIGH").Text = "999999999"
+    
+    ' Limpiar Company Code
+    session.findById("wnd[0]/usr/ctxtKD_BUKRS-LOW").Text = ""
+    session.findById("wnd[0]/usr/ctxtKD_BUKRS-LOW").SetFocus
+    session.findById("wnd[0]/usr/ctxtKD_BUKRS-LOW").caretPosition = 0
+    
+    ' Abrir Selecciones Dinámicas
+    session.findById("wnd[0]/tbar[1]/btn[16]").press
+    
+    ' Clic en el botón de Selección Múltiple del Document Number
+    session.findById("wnd[0]/usr/ssub%_SUBSCREEN_%_SUB%_CONTAINER:SAPLSSEL:2001/ssubSUBSCREEN_CONTAINER2:SAPLSSEL:2000/ssubSUBSCREEN_CONTAINER:SAPLSSEL:1106/btn%_%%DYN011_%_APP_%-VALU_PUSH").press
+    
+    ' Importar desde el Portapapeles (Shift+F12)
+    session.findById("wnd[1]/tbar[0]/btn[24]").press
+    session.findById("wnd[1]/tbar[0]/btn[8]").press ' Ejecutar/Copiar (F8)
+    session.findById("wnd[0]/tbar[1]/btn[8]").press ' Ejecutar Reporte FBL1N (F8)
+    
+    ' Descargar a TXT Local
+    session.findById("wnd[0]/mbar/menu[0]/menu[3]/menu[2]").Select
+    session.findById("wnd[1]/tbar[0]/btn[0]").press ' Formato Unconverted
+    
+    session.findById("wnd[1]/usr/ctxtDY_PATH").Text = rutaDestino
+    session.findById("wnd[1]/usr/ctxtDY_FILENAME").Text = nombreArchivo
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    
+    ' Si pregunta por sobreescribir (Replace), presionamos Confirmar
+    If session.Children.Count > 1 Then
+        session.findById("wnd[1]/tbar[0]/btn[11]").press
+    End If
+    On Error GoTo 0
+
+    Application.CutCopyMode = False ' Limpiar portapapeles
+    wsRaw.AutoFilterMode = False ' Quitar filtro de RawData
+
+    ' --- 5. LECTURA Y LIMPIEZA DEL ARCHIVO TXT (LÓGICA BLINDADA) ---
+    If Dir(rutaCompleta) = "" Then
+        MsgBox "El archivo " & nombreArchivo & " no se descargó correctamente desde SAP.", vbCritical
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+
+    ' ABRIR TXT CON REGLAS ESTRICTAS: Respetar los espacios vacíos y no comprimir columnas
+    Workbooks.OpenText Filename:=rutaCompleta, DataType:=xlDelimited, _
+        ConsecutiveDelimiter:=False, Tab:=False, Semicolon:=False, Comma:=False, _
+        Space:=False, Other:=True, OtherChar:="|"
+        
+    Set wbTxt = ActiveWorkbook
+    Set wsTxt = wbTxt.Sheets(1)
+    
+    ' Definir los encabezados exactos que pediste
+    reqHeaders = Array("DD", "DocumentNo", "Type", "Doc. Date", "Pstng Date", "Amount in Local Crcy", _
+                       "LCurr", "PBk", "Pmnt Date", "Clrng doc.", "Check Number", "CoCd", "Text", _
+                       "Discount Base Amount", "User Name", "Inv. Ref.", "Reference")
+                       
+    ' Escribir los encabezados del TXT y añadir el de Concatenate en R1
+    wsFBL1N.Range("A1").Resize(1, 17).Value = reqHeaders
+    wsFBL1N.Range("R1").Value = "Concatenate"
+    wsFBL1N.Range("A1:R1").Font.Bold = True
+
+    ' Buscar la fila donde aparece el PRIMER encabezado en el TXT
+    headerRow = 0
+    For i = 1 To 50
+        For c = 1 To 20
+            If Trim(wsTxt.Cells(i, c).Value) = "DocumentNo" Then
+                headerRow = i
+                Exit For
+            End If
+        Next c
+        If headerRow > 0 Then Exit For
+    Next i
+
+    ' Si encuentra los encabezados, empezamos el mapeo y limpieza
+    If headerRow > 0 Then
+        ' Guardar en qué número de columna está cada dato
+        For i = 1 To 17
+            colMap(i) = 0
+            For c = 1 To 50
+                If Trim(wsTxt.Cells(headerRow, c).Value) = reqHeaders(i - 1) Then
+                    colMap(i) = c
+                    Exit For
+                End If
+            Next c
+        Next i
+        
+        rLog = 2
+        ' Buscar hasta el final del archivo de texto
+        uFilaTxt = wsTxt.Cells.SpecialCells(xlCellTypeLastCell).Row
+        
+        ' Recorrer todo el archivo fila por fila
+        For i = headerRow + 1 To uFilaTxt
+            ' Validar que la columna DocumentNo se haya encontrado
+            If colMap(2) > 0 Then
+                docVal = Trim(wsTxt.Cells(i, colMap(2)).Value)
+                
+                ' FILTRO MÁGICO Y ESTRICTO:
+                ' 1. No está vacío
+                ' 2. No es el título "DocumentNo"
+                ' 3. No tiene guiones "---"
+                ' 4. No tiene puntos decimales (los números de documento no los tienen, los montos sí)
+                If docVal <> "" And docVal <> "DocumentNo" And InStr(docVal, "---") = 0 And InStr(docVal, ".") = 0 Then
+                    
+                    ' Asegurar que las primeras 3 columnas no tengan asteriscos (subtotales) ni digan "Supplier"
+                    If InStr(Trim(wsTxt.Cells(i, 1).Value) & Trim(wsTxt.Cells(i, 2).Value) & Trim(wsTxt.Cells(i, 3).Value), "*") = 0 Then
+                        If InStr(1, Trim(wsTxt.Cells(i, 1).Value) & Trim(wsTxt.Cells(i, 2).Value), "Supplier", vbTextCompare) = 0 Then
+                            
+                            ' Si pasa todas las pruebas, copiar las 17 columnas limpias a FBL1N
+                            For c = 1 To 17
+                                If colMap(c) > 0 Then
+                                    wsFBL1N.Cells(rLog, c).Value = Trim(wsTxt.Cells(i, colMap(c)).Value)
+                                End If
+                            Next c
+                            rLog = rLog + 1
+                            
+                        End If
+                    End If
+                End If
+            End If
+        Next i
+    Else
+        MsgBox "No se pudieron encontrar los encabezados en el archivo TXT de SAP.", vbExclamation
+    End If
+
+    ' Cerrar TXT sin guardar
+    wbTxt.Close SaveChanges:=False
+    
+    ' --- 6. COMPLETAR FÓRMULA CONCATENATE EN COLUMNA R ---
+    If rLog > 2 Then
+        ' Aplica la fórmula desde la fila 2 hasta la última fila que se procesó (rLog - 1)
+        wsFBL1N.Range("R2:R" & (rLog - 1)).Formula = "=CONCATENATE(B2,"" "",L2)"
+    End If
+
+    ' Autoajustar las columnas (A a R)
+    wsFBL1N.Columns("A:R").EntireColumn.AutoFit
+
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+
+    ' MENSAJE FINAL MODIFICADO A INGLÉS
+    MsgBox "FBL1N report downloaded, cleaned, and formula applied successfully.", vbInformation, "Step 2 Completed"
+
+End Sub
+
+Attribute VB_Name = "Module3"
+' ====================================================================================
+' PASO 3: Macro Final - Filtrado Exacto, Cruces, Claims y Auditoría Protegida
+' ====================================================================================
+Public Sub GenerarFinalYClaims()
+
+    ' --- 1. DECLARACIÓN DE VARIABLES ---
+    Dim wsRaw As Worksheet, wsClaims As Worksheet, wsFBL1N As Worksheet, wsInst As Worksheet
+    Dim uFilaRaw As Long, uFilaClaims As Long, r As Long
+    Dim rngCopy As Range
+    Dim claimCounter As Long
+    
+    ' Variables para leer el usuario de SAP
+    Dim SapGuiAuto As Object, sapApp As Object, connection As Object, session As Object
+    Dim sapUser As String, nombreAuditor As String
+    Dim encabezados As Variant
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+
+    ' --- 2. CONFIGURACIÓN DE PESTAÑAS Y PROTECCIÓN DE "CLEARED" ---
+    Set wsRaw = ThisWorkbook.Sheets("RawData")
+    
+    On Error Resume Next
+    Set wsFBL1N = ThisWorkbook.Sheets("FBL1N")
+    Set wsClaims = ThisWorkbook.Sheets("Claims")
+    Set wsInst = ThisWorkbook.Sheets("Instructions")
+    On Error GoTo 0
+
+    ' =========================================================================
+    ' A. DICCIONARIO DE RESPALDO (Para no pisar el "Cleared" del auditor)
+    ' =========================================================================
+    Dim dictBlocks As Object
+    Set dictBlocks = CreateObject("Scripting.Dictionary")
+    dictBlocks.CompareMode = 1 ' TextCompare
+
+    If Not wsClaims Is Nothing Then
+        Dim uFilaOld As Long
+        uFilaOld = wsClaims.Cells(wsClaims.Rows.Count, "B").End(xlUp).Row
+        If uFilaOld >= 2 Then
+            Dim iOld As Long, oldKey As String, oldBlock As String
+            For iOld = 2 To uFilaOld
+                ' Llave: Document Number + Space + Company Code
+                oldKey = Trim(wsClaims.Cells(iOld, 3).Value) & " " & Trim(wsClaims.Cells(iOld, 2).Value)
+                oldBlock = Trim(UCase(wsClaims.Cells(iOld, 20).Value))
+                
+                If oldBlock = "CLEARED" And oldKey <> " " Then
+                    dictBlocks(oldKey) = "CLEARED"
+                End If
+            Next iOld
+        End If
+    Else
+        Set wsClaims = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsClaims.Name = "Claims"
+    End If
+    
+    ' Ahora sí podemos borrar la hoja de Claims con seguridad
+    wsClaims.Cells.Clear
+
+    ' --- 3. EXTRACCIÓN GARANTIZADA DE RAWDATA (TODAS LAS FILAS) ---
+    If wsRaw.AutoFilterMode Then wsRaw.AutoFilterMode = False
+    uFilaRaw = wsRaw.Cells(wsRaw.Rows.Count, "A").End(xlUp).Row
+
+    If uFilaRaw < 2 Then
+        MsgBox "No hay data en RawData para procesar.", vbExclamation
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+
+    ' Columna Auxiliar (S) para atrapar CUALQUIER tipo de duplicado (N, O, P o Q)
+    wsRaw.Range("S1").Value = "HelperDup"
+    wsRaw.Range("S2:S" & uFilaRaw).Formula = "=IF(OR(N2<>"""",O2<>"""",P2<>"""",Q2<>""""), 1, """")"
+    wsRaw.Range("S2:S" & uFilaRaw).Value = wsRaw.Range("S2:S" & uFilaRaw).Value
+    
+    wsRaw.Range("A1:S" & uFilaRaw).AutoFilter Field:=19, Criteria1:="1"
+
+    ' Copiamos SOLAMENTE de la "A" a la "M", garantizando que vienen todos
+    On Error Resume Next
+    Set rngCopy = wsRaw.Range("A2:M" & uFilaRaw).SpecialCells(xlCellTypeVisible)
+    On Error GoTo 0
+
+    If rngCopy Is Nothing Then
+        MsgBox "No duplicate results found in RawData.", vbInformation, "No Data"
+        wsRaw.AutoFilterMode = False
+        wsRaw.Columns("S").Clear ' Limpieza
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+
+    ' Pegamos en Claims preservando VALORES Y FORMATOS
+    rngCopy.Copy
+    wsClaims.Range("B2").PasteSpecial Paste:=xlPasteValuesAndNumberFormats
+    Application.CutCopyMode = False
+    
+    wsRaw.AutoFilterMode = False
+    wsRaw.Columns("S").Clear ' Borramos la columna auxiliar para dejar RawData limpia
+
+    uFilaClaims = wsClaims.Cells(wsClaims.Rows.Count, "B").End(xlUp).Row
+
+    ' --- 4. ENCABEZADOS Y FORMATO DE FECHAS CORRECTO ---
+    wsClaims.Range("A1").Value = "Claim Number"
+    
+    encabezados = Array("Company Code", "Document Number", "Invoice Num.", "Vendor Number", _
+                        "Invoice Amount", "Inv. date", "Check Number", "Creation Date", _
+                        "Invoice Due Date", "Payment Block Key", "Invoice Status", "Created By", _
+                        "Reference (Numbers Only)", "DocType", "PO", "Invoice type", _
+                        "Report Date", "Uploaded by", "Block?")
+                        
+    wsClaims.Range("B1").Resize(1, 19).Value = encabezados
+    wsClaims.Range("A1:T1").Font.Bold = True
+
+    ' Forzamos el formato de las columnas importadas de RawData
+    wsClaims.Columns("F").NumberFormat = "0.00"       ' Invoice Amount
+    wsClaims.Columns("G").NumberFormat = "mm/dd/yyyy" ' Inv. date
+    wsClaims.Columns("I").NumberFormat = "mm/dd/yyyy" ' Creation Date
+    wsClaims.Columns("J").NumberFormat = "mm/dd/yyyy" ' Invoice Due Date
+
+    If uFilaClaims >= 2 Then
+    
+        ' =========================================================================
+        ' B. DICCIONARIO FBL1N (Cruce ultra-rápido por "Concatenate" + "Monto Absoluto")
+        ' =========================================================================
+        Dim dictFBL As Object
+        Set dictFBL = CreateObject("Scripting.Dictionary")
+        dictFBL.CompareMode = 1 ' TextCompare
+        
+        Dim fblData As Variant
+        Dim uFilaFBL As Long
+        Dim fblAmtStr As String, fblAmt As Double
+        
+        If Not wsFBL1N Is Nothing Then
+            uFilaFBL = wsFBL1N.Cells(wsFBL1N.Rows.Count, "A").End(xlUp).Row
+            If uFilaFBL >= 2 Then
+                fblData = wsFBL1N.Range("A1:R" & uFilaFBL).Value
+                Dim iFBL As Long, keyFBL As String
+                
+                For iFBL = 2 To UBound(fblData, 1)
+                    ' 1. Procesar el monto de FBL1N (Amount in Local Crcy - Columna 6)
+                    fblAmtStr = Replace(Trim(fblData(iFBL, 6)), ",", "")
+                    If Right(fblAmtStr, 1) = "-" Then fblAmtStr = "-" & Left(fblAmtStr, Len(fblAmtStr) - 1)
+                    If IsNumeric(fblAmtStr) Then fblAmt = Abs(Round(CDbl(fblAmtStr), 2)) Else fblAmt = 0
+                    
+                    ' 2. Crear llave: Concatenate (Col R) + "|" + Monto Absoluto
+                    keyFBL = Trim(fblData(iFBL, 18)) & "|" & CStr(fblAmt)
+                    
+                    If Trim(fblData(iFBL, 18)) <> "" And Not dictFBL.Exists(keyFBL) Then
+                        ' Guardamos un Array: Type(3), Text/PO(13) y InvoiceType/Ref(17)
+                        dictFBL.Add keyFBL, Array(Trim(fblData(iFBL, 3)), Trim(fblData(iFBL, 13)), Trim(fblData(iFBL, 17)))
+                    End If
+                Next iFBL
+            End If
+        End If
+
+        ' --- LEER USUARIO DESDE SAP PARA "UPLOADED BY" ---
+        nombreAuditor = "Usuario Desconocido"
+        On Error Resume Next
+        Set SapGuiAuto = GetObject("SAPGUI")
+        Set sapApp = SapGuiAuto.GetScriptingEngine
+        Set connection = sapApp.Children(0)
+        Set session = connection.Children(0)
+        On Error GoTo 0
+
+        If Not session Is Nothing Then
+            sapUser = UCase(Trim(session.Info.User))
+            Select Case sapUser
+                Case "MARILOJO": nombreAuditor = "Mariano Lojo"
+                Case "NAHULUCERO": nombreAuditor = "Nahuel Lucero"
+                Case "MARIDIMARC": nombreAuditor = "María Delfina Di Marco"
+                Case Else: nombreAuditor = session.Info.User
+            End Select
+        End If
+
+        ' =========================================================================
+        ' C. BUCLE PRINCIPAL DE PROCESAMIENTO
+        ' =========================================================================
+        Dim cleanRef As String, keyClaim As String, docTypeStr As String
+        Dim valAmt As Double, amtStr As String
+        Dim arrV As Variant
+        Dim statusInvoice As String, pBlockKey As String
+
+        For r = 2 To uFilaClaims
+            ' --- 1. Extraer Reference (Numbers Only) usando la función RegEx ---
+            cleanRef = LimpiarReferencia(Trim(wsClaims.Cells(r, 4).Value)) ' Col D (Invoice Num.)
+            If IsNumeric(cleanRef) And cleanRef <> "" Then
+                wsClaims.Cells(r, 14).Value = CDbl(cleanRef) ' Pegar como número puro
+            Else
+                wsClaims.Cells(r, 14).Value = cleanRef
+            End If
+
+            ' --- 2. Procesar el monto actual de RawData (Invoice Amount - Col F) ---
+            amtStr = Replace(Trim(wsClaims.Cells(r, 6).Text), ",", "")
+            If Right(amtStr, 1) = "-" Then amtStr = "-" & Left(amtStr, Len(amtStr) - 1)
+            If IsNumeric(amtStr) Then valAmt = CDbl(amtStr) Else valAmt = 0
+
+            ' --- 3. Cruce con Diccionario FBL1N por "Concatenate" + "Monto Absoluto" ---
+            keyClaim = Trim(wsClaims.Cells(r, 3).Value) & " " & Trim(wsClaims.Cells(r, 2).Value) & "|" & CStr(Abs(Round(valAmt, 2)))
+            
+            If dictFBL.Exists(keyClaim) Then
+                arrV = dictFBL(keyClaim)
+                ' Usamos '#N/A para forzar formato texto y no romper la macro con errores
+                wsClaims.Cells(r, 15).Value = IIf(arrV(0) = "", "'#N/A", arrV(0)) ' DocType
+                wsClaims.Cells(r, 16).Value = IIf(arrV(1) = "", "'#N/A", arrV(1)) ' PO
+                wsClaims.Cells(r, 17).Value = IIf(arrV(2) = "", "'#N/A", arrV(2)) ' Invoice Type
+                
+                docTypeStr = UCase(arrV(0)) ' Se lee desde el diccionario
+            Else
+                wsClaims.Cells(r, 15).Value = "'#N/A"
+                wsClaims.Cells(r, 16).Value = "'#N/A"
+                wsClaims.Cells(r, 17).Value = "'#N/A"
+                docTypeStr = ""
+            End If
+
+            ' --- 4. Regla de Signos para Invoice Amount ---
+            ' Credit Memo = Positivo, Estándar = Negativo (-1)
+            If InStr(docTypeStr, "KG") > 0 Or InStr(docTypeStr, "CREDIT") > 0 Then
+                valAmt = Abs(valAmt)
+            Else
+                valAmt = -Abs(valAmt)
+            End If
+            wsClaims.Cells(r, 6).Value = valAmt
+
+            ' --- 5. Columnas de Auditoría ---
+            wsClaims.Cells(r, 18).Value = Format(Date, "mm/dd/yyyy")
+            wsClaims.Cells(r, 19).Value = nombreAuditor
+
+            ' --- 6. Lógica Estricta de "Block?" y Protección "Cleared" ---
+            ' Verificamos si en la ejecución anterior este documento ya estaba Cleared
+            Dim keyBlock As String
+            keyBlock = Trim(wsClaims.Cells(r, 3).Value) & " " & Trim(wsClaims.Cells(r, 2).Value)
+            
+            If dictBlocks.Exists(keyBlock) Then
+                wsClaims.Cells(r, 20).Value = "Cleared"
+            Else
+                pBlockKey = Trim(UCase(wsClaims.Cells(r, 11).Text))     ' Payment Block Key
+                statusInvoice = Trim(UCase(wsClaims.Cells(r, 12).Text)) ' Invoice Status
+                
+                ' Lógica exacta de prioridades de estado
+                If statusInvoice = "PAID" Then
+                    wsClaims.Cells(r, 20).Value = "Paid"
+                ElseIf pBlockKey = "R" Then
+                    wsClaims.Cells(r, 20).Value = "Blck R"
+                ElseIf pBlockKey = "B" Then
+                    wsClaims.Cells(r, 20).Value = "Yes"
+                ElseIf pBlockKey = "" Then
+                    wsClaims.Cells(r, 20).Value = "No"
+                End If
+            End If
+        Next r
+
+        ' =========================================================================
+        ' D. ORDENAMIENTO Y ASIGNACIÓN CORRELATIVA DE CLAIMS (Por Referencia)
+        ' =========================================================================
+        wsClaims.Columns("A:T").EntireColumn.AutoFit
+        
+        ' Ordenamos por Referencia Limpia (N) de menor a mayor, luego Monto (F) y Proveedor (E)
+        With wsClaims.Sort
+            .SortFields.Clear
+            .SortFields.Add Key:=wsClaims.Range("N2:N" & uFilaClaims), SortOn:=xlSortOnValues, Order:=xlAscending, DataOption:=xlSortNormal
+            .SortFields.Add Key:=wsClaims.Range("F2:F" & uFilaClaims), SortOn:=xlSortOnValues, Order:=xlAscending, DataOption:=xlSortNormal
+            .SortFields.Add Key:=wsClaims.Range("E2:E" & uFilaClaims), SortOn:=xlSortOnValues, Order:=xlAscending, DataOption:=xlSortNormal
+            .SetRange wsClaims.Range("A1:T" & uFilaClaims)
+            .Header = xlYes
+            .Apply
+        End With
+
+        ' Asignación inteligente de los Claims comenzando desde Instructions!D8
+        Dim claimId As Long
+        If Not wsInst Is Nothing Then
+            If IsNumeric(wsInst.Range("D8").Value) And Trim(wsInst.Range("D8").Value) <> "" Then
+                claimId = CLng(wsInst.Range("D8").Value) + 1
+            Else
+                claimId = 1
+            End If
+        Else
+            claimId = 1
+        End If
+
+        wsClaims.Cells(2, 1).Value = claimId
+
+        For r = 3 To uFilaClaims
+            ' NUEVA LÓGICA ESTRICTA: Evalúa si es la misma Referencia (Columna N)
+            If wsClaims.Cells(r, 14).Value = wsClaims.Cells(r - 1, 14).Value Then
+                wsClaims.Cells(r, 1).Value = claimId
+            Else
+                claimId = claimId + 1
+                wsClaims.Cells(r, 1).Value = claimId
+            End If
+        Next r
+
+    End If
+
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+
+    ' MENSAJE FINAL EN INGLÉS
+    MsgBox "Final process completed successfully. Auditor's work was respected, and all duplicate rows from RawData were extracted.", vbInformation, "Process Completed"
+
+End Sub
+
+' ====================================================================================
+' FUNCIÓN AUXILIAR: Limpieza estricta de Referencias (No borrar)
+' ====================================================================================
+Function LimpiarReferencia(ByVal texto As String) As String
+    Dim i As Integer
+    Dim char As String
+    Dim resultado As String
+    
+    resultado = ""
+    
+    ' Recorremos y extraemos únicamente los dígitos del 0 al 9
+    For i = 1 To Len(texto)
+        char = Mid(texto, i, 1)
+        If char Like "[0-9]" Then
+            resultado = resultado & char
+        End If
+    Next i
+    
+    ' Quitamos los ceros a la izquierda iterativamente
+    Do While Left(resultado, 1) = "0" And Len(resultado) > 1
+        resultado = Mid(resultado, 2)
+    Loop
+    
+    LimpiarReferencia = resultado
+End Function
+
+Attribute VB_Name = "Module4"
+' ====================================================================================
+' PASO 4: Filtrar UNPAID + Block="No", preparar pestaña Block y Bloquear en SAP FBL1N
+' ====================================================================================
+Public Sub PrepararYBloquearDocumentos()
+
+    ' --- DECLARACIÓN DE VARIABLES ---
+    Dim wsClaims As Worksheet, wsBlock As Worksheet
+    Dim lrClaims As Long, lrBlock As Long, i As Long
+    Dim rngVisible As Range
+    
+    ' Variables de SAP
+    Dim SapGuiAuto As Object, AppSAP As Object, connection As Object, session As Object
+    Dim vVendor As String, vCompany As String, vDoc As String, vText As String, vLog As String
+    Dim successBlock As Boolean
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+
+    ' ==========================================================================
+    ' FASE 1: PREPARACIÓN EN EXCEL
+    ' ==========================================================================
+    ' Cambiamos a la pestaña Claims
+    Set wsClaims = ThisWorkbook.Sheets("Claims")
+    
+    ' Crear o limpiar pestaña Block
+    On Error Resume Next
+    Set wsBlock = ThisWorkbook.Sheets("Block")
+    On Error GoTo 0
+    
+    If wsBlock Is Nothing Then
+        Set wsBlock = ThisWorkbook.Sheets.Add(After:=wsClaims)
+        wsBlock.Name = "Block"
+    End If
+    
+    wsBlock.Cells.Clear
+    
+    ' Escribir encabezados en Block
+    wsBlock.Range("A1:E1").Value = Array("Vendor", "Company", "Document", "Text", "Log")
+    wsBlock.Range("A1:E1").Font.Bold = True
+
+    ' Quitar filtros previos en Claims
+    If wsClaims.AutoFilterMode Then wsClaims.AutoFilterMode = False
+    
+    lrClaims = wsClaims.Cells(wsClaims.Rows.Count, "A").End(xlUp).Row
+    If lrClaims < 2 Then
+        MsgBox "No hay datos en la pestaña Claims.", vbExclamation
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+
+    ' Doble Filtro: Columna 12 (L) por "UNPAID" y Columna 20 (T) por "No"
+    wsClaims.Range("A1:T" & lrClaims).AutoFilter Field:=12, Criteria1:="UNPAID"
+    wsClaims.Range("A1:T" & lrClaims).AutoFilter Field:=20, Criteria1:="No"
+
+    ' Validar si el filtro arrojó resultados
+    On Error Resume Next
+    Set rngVisible = wsClaims.Range("A2:A" & lrClaims).SpecialCells(xlCellTypeVisible)
+    On Error GoTo 0
+
+    If rngVisible Is Nothing Then
+        MsgBox "No se encontraron documentos con estado UNPAID que requieran bloqueo (Block? = No).", vbInformation, "Sin Datos"
+        wsClaims.AutoFilterMode = False
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+
+    ' Copiar datos visibles a la pestaña Block
+    ' Vendor (Col E de Claims -> Col A de Block)
+    wsClaims.Range("E2:E" & lrClaims).SpecialCells(xlCellTypeVisible).Copy
+    wsBlock.Range("A2").PasteSpecial Paste:=xlPasteValues
+    
+    ' Company Code (Col B de Claims -> Col B de Block)
+    wsClaims.Range("B2:B" & lrClaims).SpecialCells(xlCellTypeVisible).Copy
+    wsBlock.Range("B2").PasteSpecial Paste:=xlPasteValues
+    
+    ' Document Number (Col C de Claims -> Col C de Block)
+    wsClaims.Range("C2:C" & lrClaims).SpecialCells(xlCellTypeVisible).Copy
+    wsBlock.Range("C2").PasteSpecial Paste:=xlPasteValues
+    
+    Application.CutCopyMode = False
+    wsClaims.AutoFilterMode = False ' Limpiar filtro en Claims
+
+    ' Rellenar "BLOCK" en la columna D
+    lrBlock = wsBlock.Cells(wsBlock.Rows.Count, "A").End(xlUp).Row
+    wsBlock.Range("D2:D" & lrBlock).Value = "BLOCK"
+    
+    wsBlock.Columns("A:E").EntireColumn.AutoFit
+
+    ' ==========================================================================
+    ' FASE 2: EJECUCIÓN EN SAP
+    ' ==========================================================================
+    
+    ' Conexión a SAP
+    On Error Resume Next
+    Set SapGuiAuto = GetObject("SAPGUI")
+    If SapGuiAuto Is Nothing Then
+        MsgBox "Los datos se copiaron a la pestaña Block, pero SAP no está abierto para continuar.", vbCritical
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+    
+    Set AppSAP = SapGuiAuto.GetScriptingEngine
+    Set connection = AppSAP.Children(0)
+    Set session = connection.Children(0)
+    
+    If session Is Nothing Then
+        MsgBox "Error: No se encontró una sesión activa de SAP.", vbCritical
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+    On Error GoTo 0
+    
+    ' Activar la pestaña Block para ver el proceso
+    wsBlock.Select
+    Application.ScreenUpdating = True
+    
+    ' Bucle para recorrer el Excel (Desde la fila 2 porque la 1 tiene los encabezados)
+    For i = 2 To lrBlock
+        
+        vVendor = Trim(wsBlock.Cells(i, 1).Value)
+        vCompany = Trim(wsBlock.Cells(i, 2).Value)
+        vDoc = Trim(wsBlock.Cells(i, 3).Value)
+        vText = Trim(wsBlock.Cells(i, 4).Value)
+        vLog = ""
+        successBlock = False
+        
+        ' Limpiar formato de la columna Log (E)
+        wsBlock.Cells(i, 5).Interior.ColorIndex = xlNone
+        wsBlock.Cells(i, 5).Font.ColorIndex = xlAutomatic
+        
+        If vVendor <> "" And vCompany <> "" And vDoc <> "" Then
+            
+            On Error Resume Next
+            
+            ' 1. Entrar a FBL1N
+            session.findById("wnd[0]/tbar[0]/okcd").Text = "/nFBL1N"
+            session.findById("wnd[0]").sendVKey 0
+            
+            ' 2. Ingresar Opciones y Parámetros (Según grabación)
+            session.findById("wnd[0]/usr/chkX_SHBV").Selected = True ' Special G/L
+            session.findById("wnd[0]/usr/chkX_MERK").Selected = True ' Noted items
+            session.findById("wnd[0]/usr/radX_AISEL").Select         ' All items
+            
+            session.findById("wnd[0]/usr/ctxtKD_LIFNR-LOW").Text = vVendor
+            session.findById("wnd[0]/usr/ctxtKD_BUKRS-LOW").Text = "*" ' Astérisco como en tu grabación
+            
+            ' 3. Usar Dynamic Selections para filtrar el documento exacto
+            session.findById("wnd[0]/tbar[1]/btn[16]").press
+            session.findById("wnd[0]/usr/ssub%_SUBSCREEN_%_SUB%_CONTAINER:SAPLSSEL:2001/ssubSUBSCREEN_CONTAINER2:SAPLSSEL:2000/ssubSUBSCREEN_CONTAINER:SAPLSSEL:1106/txt%%DYN011-LOW").Text = vDoc
+            
+            ' Ejecutar FBL1N
+            session.findById("wnd[0]/tbar[1]/btn[8]").press
+            
+            ' Validar si hay partidas
+            If InStr(1, LCase(session.findById("wnd[0]/sbar").Text), "no items") > 0 Or _
+               InStr(1, LCase(session.findById("wnd[0]/sbar").Text), "ninguna partida") > 0 Then
+                vLog = session.findById("wnd[0]/sbar").Text
+                GoTo GuardarLog
+            End If
+            
+            ' 4. Entrar al documento y editar (Lógica infalible FB02)
+            session.findById("wnd[0]").sendVKey 2 ' Doble clic al único resultado visible
+            session.findById("wnd[0]/tbar[1]/btn[13]").press ' Editar (Lápiz)
+            session.findById("wnd[0]/usr/ctxtBSEG-ZLSPR").Text = "B" ' Colocar la B de bloqueo
+            
+            ' Si hay un texto para colocar en la cabecera
+            If vText <> "" Then
+                session.findById("wnd[0]/tbar[1]/btn[5]").press
+                session.findById("wnd[1]/usr/txtBKPF-BKTXT").Text = vText
+                session.findById("wnd[1]/tbar[0]/btn[0]").press
+            End If
+            
+            session.findById("wnd[0]/tbar[0]/btn[11]").press ' Guardar
+            
+            ' Capturar Log de éxito
+            vLog = session.findById("wnd[0]/sbar").Text
+            
+GuardarLog:
+            wsBlock.Cells(i, 5).Value = vLog
+            
+            If Err.Number <> 0 And vLog = "" Then
+                vLog = "Error Macro: " & Err.Description
+                wsBlock.Cells(i, 5).Value = vLog
+                Err.Clear
+            End If
+            On Error GoTo 0
+            
+            ' Aplicar colores al Log y confirmar éxito
+            If InStr(1, LCase(vLog), "changed") > 0 Or _
+               InStr(1, LCase(vLog), "modificad") > 0 Or _
+               InStr(1, LCase(vLog), "guardad") > 0 Or _
+               InStr(1, LCase(vLog), "saved") > 0 Then
+                
+                successBlock = True
+                wsBlock.Cells(i, 5).Interior.Color = RGB(198, 239, 206) ' Verde
+                wsBlock.Cells(i, 5).Font.Color = RGB(0, 97, 0)
+            ElseIf Trim(vLog) <> "" Then
+                wsBlock.Cells(i, 5).Interior.Color = RGB(255, 199, 206) ' Rojo
+                wsBlock.Cells(i, 5).Font.Color = RGB(156, 0, 6)
+            End If
+            
+            ' ==========================================================================
+            ' FASE 3: ACTUALIZAR "CLAIMS" TAB A "YES" SI FUE EXITOSO
+            ' ==========================================================================
+            If successBlock Then
+                Dim rClaim As Long
+                For rClaim = 2 To lrClaims
+                    ' Buscar coincidencias (Si es el mismo documento y el mismo código de compañía)
+                    If Trim(wsClaims.Cells(rClaim, 3).Value) = vDoc And Trim(wsClaims.Cells(rClaim, 2).Value) = vCompany Then
+                        wsClaims.Cells(rClaim, 20).Value = "Yes" ' Cambiar "No" por "Yes"
+                    End If
+                Next rClaim
+            End If
+            
+        End If
+    Next i
+    
+    Application.DisplayAlerts = True
+    
+    ' MENSAJE FINAL EN INGLÉS
+    MsgBox "Document blocking process completed successfully.", vbInformation, "Success"
+
+End Sub
+
+Attribute VB_Name = "Module5"
+' ====================================================================================
+' PASO 3.5: Macro de Exportación a Excel vía SAP VIM (ZVIM_VA2)
+' ====================================================================================
+Public Sub VIMTxt()
+
+    ' --- 1. DECLARACIÓN DE VARIABLES ---
+    Dim wsClaims As Worksheet
+    Dim uFilaClaims As Long
+    
+    ' Variables SAP
+    Dim SapGuiAuto As Object, sapApp As Object, connection As Object, session As Object
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+
+    ' --- 2. CONFIGURACIÓN DE PESTAÑA ---
+    On Error Resume Next
+    Set wsClaims = ThisWorkbook.Sheets("Claims")
+    On Error GoTo 0
+
+    If wsClaims Is Nothing Then
+        MsgBox "The 'Claims' tab was not found. Please run the main generation macro first.", vbCritical
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+
+    ' Calcular la última fila real basándonos en la Columna C (Document Number)
+    uFilaClaims = wsClaims.Cells(wsClaims.Rows.Count, "C").End(xlUp).Row
+    
+    If uFilaClaims < 2 Then
+        MsgBox "No data found in the Claims tab to export.", vbExclamation
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+
+    ' ==========================================================================
+    ' FASE 3: CONEXIÓN Y EJECUCIÓN EN SAP (ZVIM_VA2)
+    ' ==========================================================================
+    On Error Resume Next
+    Set SapGuiAuto = GetObject("SAPGUI")
+    Set sapApp = SapGuiAuto.GetScriptingEngine
+    Set connection = sapApp.Children(0)
+    Set session = connection.Children(0)
+    On Error GoTo 0
+
+    If session Is Nothing Then
+        MsgBox "SAP is not active to extract VIM data.", vbExclamation
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+
+    On Error Resume Next
+    session.findById("wnd[0]").maximize
+    session.findById("wnd[0]/tbar[0]/okcd").Text = "/nZVIM_VA2"
+    session.findById("wnd[0]").sendVKey 0
+    On Error GoTo 0
+    
+    ' 1. Cargar Document Number (Col C) -> S_BELNRF
+    wsClaims.Range("C2:C" & uFilaClaims).Copy
+    session.findById("wnd[0]/usr/btn%_S_BELNRF_%_APP_%-VALU_PUSH").press
+    session.findById("wnd[1]/tbar[0]/btn[24]").press
+    session.findById("wnd[1]/tbar[0]/btn[8]").press
+    
+    ' 2. Company Code -> S_BUKRS
+    session.findById("wnd[0]/usr/ctxtS_BUKRS-LOW").Text = "*"
+    session.findById("wnd[0]/usr/ctxtS_BUKRS-LOW").SetFocus
+    session.findById("wnd[0]/usr/ctxtS_BUKRS-LOW").caretPosition = 1
+    
+    ' 3. Cargar Invoice Num (Col D) -> S_XBLNR
+    wsClaims.Range("D2:D" & uFilaClaims).Copy
+    session.findById("wnd[0]/usr/btn%_S_XBLNR_%_APP_%-VALU_PUSH").press
+    session.findById("wnd[1]/tbar[0]/btn[24]").press
+    session.findById("wnd[1]/tbar[0]/btn[8]").press
+    
+    ' 4. Cargar Vendor Number (Col E) -> S_LIFNR
+    wsClaims.Range("E2:E" & uFilaClaims).Copy
+    session.findById("wnd[0]/usr/btn%_S_LIFNR_%_APP_%-VALU_PUSH").press
+    session.findById("wnd[1]/tbar[0]/btn[24]").press
+    session.findById("wnd[1]/tbar[0]/btn[8]").press
+    Application.CutCopyMode = False
+    
+    ' 5. Layout y Ejecución
+    session.findById("wnd[0]/usr/ctxtP_LAYOUT").SetFocus
+    session.findById("wnd[0]/usr/ctxtP_LAYOUT").caretPosition = 0
+    session.findById("wnd[0]").sendVKey 4
+    session.findById("wnd[1]/usr/lbl[1,7]").SetFocus
+    session.findById("wnd[1]/usr/lbl[1,7]").caretPosition = 5
+    session.findById("wnd[1]").sendVKey 2
+    
+    session.findById("wnd[0]/tbar[1]/btn[8]").press
+    Application.Wait (Now + TimeValue("0:00:03"))
+    
+    ' ==========================================================================
+    ' FASE 4: EXPORTACIÓN DIRECTA A EXCEL (XXL)
+    ' ==========================================================================
+    If session.findById("wnd[0]/usr/cntlCCTRL_MAIN/shellcont/shell/shellcont[0]/shell") Is Nothing Then
+        MsgBox "The VIM T-Code returned no data.", vbInformation
+        GoTo FinMacro
+    End If
+
+    session.findById("wnd[0]/usr/cntlCCTRL_MAIN/shellcont/shell/shellcont[0]/shell").pressToolbarContextButton "&MB_EXPORT"
+    session.findById("wnd[0]/usr/cntlCCTRL_MAIN/shellcont/shell/shellcont[0]/shell").selectContextMenuItem "&XXL"
+    
+    Application.Wait (Now + TimeValue("0:00:01"))
+    
+    ' Confirmar la exportación a Excel
+    On Error Resume Next
+    session.findById("wnd[1]/usr/subSUB_CONFIGURATION:SAPLSALV_GUI_CUL_EXPORT_AS:0512/cmbGS_EXPORT-DESTINATION").SetFocus
+    session.findById("wnd[1]/tbar[0]/btn[20]").press
+    On Error GoTo 0
+
+FinMacro:
+    ThisWorkbook.Activate
+    wsClaims.Activate
+
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+
+    ' MENSAJE FINAL MODIFICADO A INGLÉS
+    MsgBox "Process completed. The SAP export will open in a new Excel file.", vbInformation, "All Set"
+
+End Sub
