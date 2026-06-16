@@ -1,0 +1,64 @@
+Duplicate Report
+
+
+T-code → ZDUPINV - Advanced SImilar Invoice Report 
+
+CAG - Data Download
+
+1.	Enter into SM37 and look for the daily automatic job:
+
+D_FIAPDUPINVREP
+
+ 
+
+2.	Select the job and click on Spool 
+
+ 
+
+3.	Click on Type
+
+ 
+
+4.	Download the data into a Google Sheets
+
+ 
+
+5.	Paste the data into the daily template and, if necessary, scroll down the formulas from M to Q
+
+ 
+
+6.	Copy and paste the lines that are under “Review Possible Duplicate” to the third tab and assign a case number in column A (considering the last case number assigned to the previous day cases)
+
+ 
+
+7.	From FBL1N, download the document numbers from this final tab to get the correct amount sign. Once downloaded, paste it into the daily template and, with a VLOOKUP formula, bring the correct amounts to the ‘Final’ sheet:
+ 
+
+ 
+
+8.	Paste the final data into the consolidated Duplicate Report
+9.	Block in SAP (from tcode FBL1N) all the items under ‘UNPAID’ status in column L with payment block B (this will help us prevent duplicate payments)
+
+
+I&E - Assignment
+
+
+1.	In T-code ZVIM_VA2 look for the document numbers:
+Fields to be completed:
+-	Supplier with the vendor numbers from column E
+-	Accounting Document Number with the document numbers from column C
+-	Reference with the invoice numbers from column D
+-	Company Code with *
+
+ 
+
+2.	Download the data and paste it into the Duplicate Report in tab ‘Doc Type’ (it is cumulative)
+
+ 
+ 
+3.	If necessary, scroll down the formulas from columns S-U:
+
+ 
+
+4.	To assign the cases, I&E team looks at column S and, depending on the type of document, they assign it to the corresponding team. 
+If a document brings N/A, then they search the document into FBL1N to determine who processed it. 
